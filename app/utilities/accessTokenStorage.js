@@ -14,10 +14,6 @@ function logWarn (logger, message) {
   if (logger && typeof logger.warn === 'function') logger.warn(message)
 }
 
-function logInfo (logger, message) {
-  if (logger && typeof logger.info === 'function') logger.info(message)
-}
-
 function normalizeStorageMode (mode) {
   return STORAGE_MODES.has(mode) ? mode : DEFAULT_STORAGE_MODE
 }
@@ -88,6 +84,29 @@ function createAccessTokenStorage ({
     return unavailableReason
   }
 
+  function logFileStorageFallback (unavailableReason) {
+    logWarn(logger, `[auth] Falling back to local file for cached access token: ${unavailableReason}`)
+  }
+
+  function readFileTokenFallback (unavailableReason) {
+    logFileStorageFallback(unavailableReason)
+    return localStorage.get(LEGACY_TOKEN_KEY)
+  }
+
+  function writeFileTokenFallback (token, unavailableReason) {
+    logFileStorageFallback(unavailableReason)
+
+    const legacyWrite = localStorage.set(LEGACY_TOKEN_KEY, token)
+    if (!legacyWrite.status) return createResult(false, null, legacyWrite.error)
+
+    const encryptedClear = localStorage.set(ENCRYPTED_TOKEN_KEY, null)
+    return createResult(
+      Boolean(encryptedClear.status),
+      token,
+      encryptedClear.error
+    )
+  }
+
   function clearEncryptedToken () {
     const encryptedClear = localStorage.set(ENCRYPTED_TOKEN_KEY, null)
     const legacyClear = localStorage.set(LEGACY_TOKEN_KEY, null)
@@ -96,9 +115,6 @@ function createAccessTokenStorage ({
 
   function writeEncryptedToken (token) {
     if (!hasTokenValue(token)) return clearEncryptedToken()
-
-    const unavailableReason = ensureEncryptedStorageAvailable()
-    if (unavailableReason) return createResult(false, null, new Error(unavailableReason))
 
     let encryptedToken
     try {
@@ -139,28 +155,15 @@ function createAccessTokenStorage ({
     }
   }
 
-  function migrateLegacyToken () {
-    const legacyToken = localStorage.get(LEGACY_TOKEN_KEY)
-    if (!legacyToken.status || !hasTokenValue(legacyToken.data)) {
-      return createResult(false, null, legacyToken.error)
-    }
-
-    const encryptedWrite = writeEncryptedToken(legacyToken.data)
-    if (!encryptedWrite.status) return encryptedWrite
-
-    logInfo(logger, '[auth] Migrated cached access token to encrypted storage')
-    return createResult(true, legacyToken.data)
-  }
-
   function getEncryptedToken () {
     const encryptedToken = localStorage.get(ENCRYPTED_TOKEN_KEY)
     if (encryptedToken.status && encryptedToken.data) {
       const unavailableReason = ensureEncryptedStorageAvailable()
-      if (unavailableReason) return createResult(false, null, new Error(unavailableReason))
+      if (unavailableReason) return readFileTokenFallback(unavailableReason)
       return readEncryptedTokenRecord(encryptedToken.data)
     }
 
-    return migrateLegacyToken()
+    return localStorage.get(LEGACY_TOKEN_KEY)
   }
 
   return {
@@ -172,6 +175,9 @@ function createAccessTokenStorage ({
     set (token) {
       if (!hasTokenValue(token)) return clearEncryptedToken()
       if (getMode() === 'file') return localStorage.set(LEGACY_TOKEN_KEY, token)
+
+      const unavailableReason = ensureEncryptedStorageAvailable()
+      if (unavailableReason) return writeFileTokenFallback(token, unavailableReason)
       return writeEncryptedToken(token)
     }
   }
