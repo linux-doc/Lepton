@@ -83,6 +83,11 @@ const leptonApi = {
     set: (configName, data) => ipcRenderer.sendSync('lepton:renderer-store:set', configName, data)
   },
   window: {
+    onFindInPageRequest: (listener) => {
+      const wrapped = () => listener()
+      ipcRenderer.on('lepton:window:open-find-in-page', wrapped)
+      return () => ipcRenderer.removeListener('lepton:window:open-find-in-page', wrapped)
+    },
     setTitle: (title) => ipcRenderer.send('lepton:window:set-title', title)
   }
 }

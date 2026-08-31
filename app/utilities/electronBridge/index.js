@@ -67,6 +67,7 @@ function createUnavailableBridge () {
       set: unavailableBridgeMethod
     },
     window: {
+      onFindInPageRequest: unavailableBridgeMethod,
       setTitle: unavailableBridgeMethod
     }
   }

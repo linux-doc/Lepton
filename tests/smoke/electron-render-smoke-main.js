@@ -526,6 +526,251 @@ async function assertFixtureLoginModeSwitch (window) {
   assertForbiddenFixtureTextAbsent(result)
 }
 
+async function assertFixturePageFind (window) {
+  const fixture = process.env.LEPTON_RENDER_FIXTURE
+  if (fixture !== 'active' && fixture !== 'search') return
+
+  const shortcutState = await window.webContents.executeJavaScript(`
+    new Promise(resolve => {
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        bubbles: true,
+        ctrlKey: ${process.platform !== 'darwin'},
+        key: 'f',
+        metaKey: ${process.platform === 'darwin'}
+      }))
+
+      const deadline = Date.now() + 1000
+      function waitForFindBar() {
+        const input = document.querySelector('.find-in-page-input')
+        if (input || Date.now() > deadline) {
+          resolve({
+            focused: input === document.activeElement,
+            hasFindBar: Boolean(input)
+          })
+          return
+        }
+        setTimeout(waitForFindBar, 50)
+      }
+      waitForFindBar()
+    })
+  `, true)
+
+  if (fixture === 'active' && shortcutState.hasFindBar) {
+    await window.webContents.insertText('fixture')
+    const resultState = await window.webContents.executeJavaScript(`
+      new Promise(resolve => {
+        const deadline = Date.now() + 5000
+        function waitForResults() {
+          const count = document.querySelector('.find-in-page-count')
+          const input = document.querySelector('.find-in-page-input')
+          const countText = count ? count.textContent : ''
+          if (countText && countText !== '0/0') {
+            resolve({
+              countText,
+              focusedAfterFind: input === document.activeElement,
+              value: input ? input.value : ''
+            })
+            return
+          }
+          if (Date.now() > deadline) {
+            resolve({ countText, reason: 'find results did not arrive', value: input ? input.value : '' })
+            return
+          }
+          setTimeout(waitForResults, 50)
+        }
+        waitForResults()
+      })
+    `, true)
+    Object.assign(shortcutState, resultState)
+
+    shortcutState.rapidInput = await window.webContents.executeJavaScript(`
+      new Promise(resolve => {
+        const input = document.querySelector('.find-in-page-input')
+        const count = document.querySelector('.find-in-page-count')
+        const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+        const values = [
+          'fixtur', 'fixtu', 'fixt', 'fix', 'fi', 'f', '',
+          'f', 'fi', 'fix', 'fixt', 'fixtu', 'fixtur', 'fixture'
+        ]
+        const startedAt = performance.now()
+
+        input.focus()
+        for (const value of values) {
+          valueSetter.call(input, value)
+          input.dispatchEvent(new Event('input', { bubbles: true }))
+        }
+
+        const dispatchDurationMs = performance.now() - startedAt
+        const deadline = Date.now() + 5000
+        requestAnimationFrame(() => {
+          const nextFrameDelayMs = performance.now() - startedAt
+          function waitForSettledResults() {
+            const countText = count ? count.textContent : ''
+            if (input.value === 'fixture' && countText && countText !== '0/0') {
+              resolve({
+                countText,
+                dispatchDurationMs,
+                focused: input === document.activeElement,
+                nextFrameDelayMs,
+                value: input.value
+              })
+              return
+            }
+            if (Date.now() > deadline) {
+              resolve({
+                countText,
+                dispatchDurationMs,
+                focused: input === document.activeElement,
+                nextFrameDelayMs,
+                reason: 'rapid input results did not settle',
+                value: input.value
+              })
+              return
+            }
+            setTimeout(waitForSettledResults, 25)
+          }
+          waitForSettledResults()
+        })
+      })
+    `, true)
+
+    const navigationStart = await window.webContents.executeJavaScript(`
+      (() => {
+        const count = document.querySelector('.find-in-page-count')
+        const buttons = document.querySelectorAll('.find-in-page-button')
+        return {
+          initial: count ? count.textContent : '',
+          targets: Array.from(buttons).slice(0, 2).map(button => {
+            const rect = button.getBoundingClientRect()
+            return {
+              x: Math.round(rect.left + rect.width / 2),
+              y: Math.round(rect.top + rect.height / 2)
+            }
+          })
+        }
+      })()
+    `, true)
+
+    async function clickFindTarget (target) {
+      window.webContents.sendInputEvent(Object.assign({
+        button: 'left',
+        clickCount: 1,
+        type: 'mouseDown'
+      }, target))
+      window.webContents.sendInputEvent(Object.assign({
+        button: 'left',
+        clickCount: 1,
+        type: 'mouseUp'
+      }, target))
+    }
+
+    async function waitForFindCountChange (previousCount) {
+      const deadline = Date.now() + 3000
+      while (Date.now() <= deadline) {
+        const state = await window.webContents.executeJavaScript(`
+          (() => {
+            const count = document.querySelector('.find-in-page-count')
+            const input = document.querySelector('.find-in-page-input')
+            return {
+              countText: count ? count.textContent : '',
+              focused: input === document.activeElement
+            }
+          })()
+        `, true)
+        if (state.countText && state.countText !== previousCount) return state
+        await wait(25)
+      }
+      return { countText: previousCount, focused: false }
+    }
+
+    await clickFindTarget(navigationStart.targets[1])
+    const nextState = await waitForFindCountChange(navigationStart.initial)
+    await clickFindTarget(navigationStart.targets[0])
+    const previousState = await waitForFindCountChange(nextState.countText)
+    shortcutState.navigation = {
+      focused: nextState.focused && previousState.focused,
+      initial: navigationStart.initial,
+      next: nextState.countText,
+      previous: previousState.countText,
+      targets: navigationStart.targets
+    }
+
+    shortcutState.highlights = await window.webContents.executeJavaScript(`
+      (() => {
+        const matches = CSS.highlights.get('lepton-find-match')
+        const active = CSS.highlights.get('lepton-find-active')
+        const activeRange = active ? active.values().next().value : null
+        const activeRect = activeRange ? activeRange.getBoundingClientRect() : null
+        const activeParent = activeRange ? activeRange.startContainer.parentElement : null
+        const activeHitTarget = activeRect
+          ? document.elementFromPoint(
+            activeRect.left + (activeRect.width / 2),
+            activeRect.top + (activeRect.height / 2)
+          )
+          : null
+        return {
+          active: active ? active.size : 0,
+          activeExposed: Boolean(activeParent && activeHitTarget && (
+            activeHitTarget === activeParent ||
+            activeParent.contains(activeHitTarget) ||
+            activeHitTarget.contains(activeParent)
+          )),
+          activeRect: activeRect ? {
+            bottom: activeRect.bottom,
+            left: activeRect.left,
+            right: activeRect.right,
+            top: activeRect.top
+          } : null,
+          activeParent: activeParent
+            ? activeParent.tagName + '.' + activeParent.className
+            : '',
+          activeText: activeRange ? activeRange.toString() : '',
+          activeStyle: activeRange && activeRange.startContainer.parentElement
+            ? getComputedStyle(activeRange.startContainer.parentElement, '::highlight(lepton-find-active)').backgroundColor
+            : '',
+          activeVisible: Boolean(activeRect && activeRect.width > 0 && activeRect.height > 0),
+          matches: matches ? matches.size : 0
+        }
+      })()
+    `, true)
+  }
+
+  await wait(750)
+  shortcutState.settledCountText = await window.webContents.executeJavaScript(`
+    (() => {
+      const count = document.querySelector('.find-in-page-count')
+      return count ? count.textContent : ''
+    })()
+  `, true)
+  if (fixture === 'search') {
+    if (shortcutState.hasFindBar) {
+      throw new Error(`Expected snippet-wide search to exclude page find: ${JSON.stringify(shortcutState)}`)
+    }
+    return
+  }
+
+  if (!shortcutState.hasFindBar ||
+      !shortcutState.focused ||
+      !shortcutState.focusedAfterFind ||
+      shortcutState.value !== 'fixture' ||
+      !shortcutState.rapidInput ||
+      !shortcutState.rapidInput.focused ||
+      shortcutState.rapidInput.value !== 'fixture' ||
+      !shortcutState.navigation ||
+      !shortcutState.navigation.focused ||
+      shortcutState.navigation.next === shortcutState.navigation.initial ||
+      shortcutState.navigation.previous === shortcutState.navigation.next ||
+      !shortcutState.highlights ||
+      shortcutState.highlights.active !== 1 ||
+      !shortcutState.highlights.activeExposed ||
+      !shortcutState.highlights.activeVisible ||
+      shortcutState.highlights.matches < 2 ||
+      !/^[1-9]\d*\/[1-9]\d*$/.test(shortcutState.rapidInput.countText || '') ||
+      !/^[1-9]\d*\/[1-9]\d*$/.test(shortcutState.settledCountText || '')) {
+    throw new Error(`Expected active snippet fixture to support local page find: ${JSON.stringify(shortcutState)}`)
+  }
+}
+
 async function main () {
   let window
 
@@ -538,6 +783,7 @@ async function main () {
       await waitForFixtureUi(window)
       assertFixtureRendererState(await getRendererState(window))
       await assertFixtureLoginModeSwitch(window)
+      await assertFixturePageFind(window)
       await captureScreenshot(window, `electron-render-${process.env.LEPTON_RENDER_FIXTURE}-success.png`)
       console.log(`electron render fixture smoke test passed: ${process.env.LEPTON_RENDER_FIXTURE}`)
     } else {
